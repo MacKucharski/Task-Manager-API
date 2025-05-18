@@ -12,4 +12,4 @@ db = SQLAlchemy(api)
 migrate = Migrate(api, db)
 
 # import api routes from routes.py, must be after api creation to avoid cyclic dependencies
-from api import tasks, tokens, users
+from api import tasks, tokens, users, errors

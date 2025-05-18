@@ -1,10 +1,74 @@
 from api import db
-from api.models import User, Task, STATUS
-from flask import current_app
+from api.models import User, Task
+from flask import current_app, request, abort
 import sqlalchemy as sa
+import functools
+
+ATTRIBUTES = ["id", "project", "name", "description", "status", "username"]
+
+
+def filter_request_parameters(func):
+    '''Decorator function to filter out all attributes that do not comply with the schema'''
+
+    @functools.wraps(func)
+    def filter_attributes(*args, **kwargs):
+        # get data from body
+        if data:= request.get_json(force= True, silent= True):
+            request_data_unfiltered = data
+        # get data from query params
+        else:
+            request_data_unfiltered = request.args
+        
+        # !!! schema check to be added
+        filtered_data = {key : request_data_unfiltered.get(key, None) for key in ATTRIBUTES}
+        return func(*args, filtered_data, **kwargs)
+    return filter_attributes
+
+
+def check_admin(token_user):
+    '''Decorator function to check if the token user has admin rights'''
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            user = token_user()
+            if user.role != 'admin':
+                current_app.logger.error(f"Authorization error. User: {token_user()}")
+                description = "You don't have the permission to access the requested resource."
+                abort(403, description=description)
+            return func(*args, user, **kwargs) 
+        return wrapper
+    return decorator
+
+
+def check_username(username: str) -> str:
+    '''Helper function to check if username is stored in the DB'''
+
+    if username:
+        # check if username in DB
+        if not get_user(username):
+            message = "Invalid username"
+            abort(404, description=message)
+        return username
+
+
+def check_task_id(task_id: str) -> Task:
+    '''Helper function to check if task id is provided in request data and if it is stored in the DB'''
+
+    if not task_id:
+        message = "Missing task id."
+        abort(400, description=message)
+    else:
+        # check if task in DB 
+        task = get_task(task_id)
+        if not task:
+            message = "Invalid task id."
+            abort(404, description=message)
+    return task
 
 
 def get_user(username: str) -> User:
+    '''Helper function to get user object from the DB'''
 
     query = sa.select(User).where(User.username == username)
 
@@ -12,61 +76,44 @@ def get_user(username: str) -> User:
 
 
 def get_task(task_id: int) -> Task:
+    '''Helper function to get task object from DB'''
 
     return db.session.get(Task, task_id)
 
 
-def get_task_list_all(token_user: User) -> list[dict]:
-    
-    # only admin can request full list
-    if token_user.role != 'admin':
-        return {
-                "error": "Authorization error",
-                "message": "You don't have the permission to access the requested resource."
-                }, 403
-    
+def get_task_list_all() -> list[dict]:
+    '''Gets list of all tasks stored in the DB'''
+
     query = sa.select(Task)
     task_objects = db.session.scalars(query).all()
 
     tasks = [task.obj_to_dict() for task in task_objects]
 
-    return tasks, 200 
+    return tasks, 200
 
 
-def get_task_list(params: dict, token_user: User) -> list[dict]:
+def get_task_list(request_data: dict, token_user: User) -> list[dict]:
+    '''Gets a filtered list of tasks based on the parameters provided'''
 
     # if username in query params, check if user exists in DB
-    if username:= params.get('username', None):
-        user = get_user(username)
-        
-        if not user:
-            return {
-                "error": "Validation error",
-                "message": "Invalid username"
-                }, 404
+    username = check_username(request_data["username"])
 
-    # check if token_user corresponds to username in query params, only admins/leaders can check other user's tasks
+    # check if token_user corresponds to username in query parameters, only admins can check other user's tasks
     if username and username != token_user.username and token_user.role != 'admin':
-        return {
-                "error": "Authorization error",
-                "message": "You don't have the permission to access the requested resource."
-                }, 403
+        current_app.logger.error(f"Authorization error. Function: get_task_list(). User: {token_user}")
+        message = "You don't have the permission to access the requested resource."
+        abort(403, description=message)
 
-    # if user is not admin/leader and there is no username in query params, add token_user.username to params dict
+    # if user is not admin and there is no username in query parameters, add token_user.username to request_data dict
     if not username and token_user.role != 'admin':
-        params = dict(params)
-        params['username'] = token_user.username
-
-    valid_params = ['project', 'name', 'status', 'username']
+        request_data = dict(request_data)
+        request_data['username'] = token_user.username
     
-    condition = [getattr(Task, key, None) == value for key, value in params.items() if value and key in valid_params]
+    condition = [getattr(Task, key, None) == request_data[key] for key in ATTRIBUTES if request_data[key]]
     
-    # if no params specified - validation error
+    # if no parameters specified - no communication with the DB, return an empty list
     if not condition:
-        return {
-                "error": "Validation error",
-                "message": "Missing or invalid query parameters"
-                }, 404
+        return [], 200
     
     # construct query based on the condition
     query = sa.select(Task).where(*condition)
@@ -78,158 +125,100 @@ def get_task_list(params: dict, token_user: User) -> list[dict]:
 
 
 def create_new_task(request_data: dict, token_user: User) -> dict:
-    
-    # only admin can create new tasks
-    if token_user.role != 'admin':
-        return {
-                "error": "Authorization error",
-                "message": "You don't have the permission to create new tasks."
-                }, 403
+    '''Creates new task based on provided input'''
 
-    # sanitizing input data
-    data = {}
-    required_attributes = ["project", "name", "description", "status"]
+    # remove 'id' key from request_data for further processing of the data
+    request_data.pop('id')
 
-    for attribute in required_attributes:
-        if value:= request_data.get(attribute, None):
-            # add schema check for value!
-            data[attribute] = value
-        else:
-            return {
-                "error": "Validation error",
-                "message": "Invalid input. Required fields - project, task name, description, status."
-            }, 400
-    
-    if username:= request_data.get("username", None):
-        # add schema check for username
-        # check if user in DB
-        user = get_user(username)
-        if not user:
-                return {
-                "error": "Validation error",
-                "message": "Invalid user id."
-                }, 404
+    for key, value in request_data.items():
+        if not value:
+            # username is the only parameter that can be empty - task can be unassigned
+            if key == 'username':
+                check_username(request_data[key])
+            
+            # all other parameters have to be provided
+            else:
+                message = "Invalid input. Required fields - project, task name, description, status."
+                abort(400, description=message)
 
     task = Task()
+    for key, value in request_data.items():
+        if value:
+            setattr(task, key, value)
 
-    for key, value in data.items():
-        setattr(task, key, value)
-    
+    # save the task in the DB
     try:
         db.session.add(task)
         db.session.commit()
 
     except Exception as e:
         db.session.rollback()
-        return {"error": "Database error", "message": str(e)}, 500
+        current_app.logger.error(f"DB commit failed: {e}. User {token_user}")
+        abort(500, description=str(e))
 
-    return {"message" : "Task {} has been created: {}".format(task.id, data)}, 201
+    return task.obj_to_dict(), 201
 
 
 def edit_task(request_data: dict, token_user: User) -> dict:
+    '''Finds task by its id and edits task object based on provided parameters'''
 
-    # check if task_id in request
-    task_id = request_data.get("task_id", None)
-    if not task_id:
-        return {
-            "error": "Validation error",
-            "message": "Missing task id."
-            }, 400
-    
-    # check if task in DB 
-    task = get_task(int(request_data["task_id"]))
-    if not task:
-        return {
-            "error": "Validation error",
-            "message": "Invalid task id."
-            }, 404
-        
+    # check if task id is provided in query parameters and if it is a valid one
+    task = check_task_id(request_data["id"])
+
     # compare username in task with current_user (only admins can change other user's tasks)
     if task.username != token_user.username and token_user.role != 'admin':
-        return {
-                "error": "Authorization error",
-                "message": "You don't have the permission to modify the requested resource."
-                }, 403
-    
-    # if username provided, check if user in DB
-    if username:= request_data.get("username", None):
-        if not get_user(username):
-            return {
-                "error": "Validation error",
-                "message": "Invalid username."
-                }, 404
+        current_app.logger.error(f"Authorization error. User: {token_user}")
+        message = "You don't have the permission to access the requested resource."
+        abort(403, description=message)
+        
+    # remove 'id' key from request_data for further processing of the data
+    request_data.pop('id')
 
-    # sanitizing input data
-    data = {}
-    valid_params = ["project", "name", "description", "status", "username"]
-
-    # admins can change all parameters
     if token_user.role == 'admin':
-        for key in valid_params:
-            if request_data.get(key, None):
-                # add schema validation
-                data[key] = request_data[key]
-
-    # regular users can only change the status
+        # verify username when request comes from admin
+        check_username(request_data["username"])
+        
+        if all(value is None for value in request_data.values()) == True:
+            # if all values are None - nothing to change
+            return {}, 200
+        else:    
+        # set attributes according to request
+            for key, value in request_data.items():
+                if value:
+                    setattr(task, key, value)
     else:
-        if status := request_data.get("status", None):
-            # add schema validation
-            data["status"] = status
-
-    # if data is empty -> no valid params specified, there is nothing to change
-    if not data:
-        return {
-            "error": "Validation error",
-            "message": "Missing input."
-            }, 400
+        if status:= request_data['status']:
+            setattr(task, 'status', status)
+        else:
+            # if status is None - nothing to change
+            return {}, 200
     
-    # set attributes according to valid attributes from request
-    for key, value in data.items():
-        setattr(task, key, value)
-    
+    # save changes in the DB
     try:
         db.session.commit()
+
     except Exception as e:
         db.session.rollback()
-        return {"error": "Database error", "message": str(e)}, 500
-    
-    message = "Task {} has been changed: {}".format(task_id, data)
+        current_app.logger.error(f"DB commit failed: {e}. User {token_user}")
+        abort(500, description=str(e))
 
-    return {"message" : message}, 200
+    return task.obj_to_dict(), 200
 
 
 def delete_task(request_data: dict, token_user: User) -> dict:
-    
-    # only admin can delete tasks
-    if token_user.role != 'admin':
-        return {
-                "error": "Authorization error",
-                "message": "You don't have the permission to modify the requested resource."
-                }, 403
+    '''Finds task by its id and deletes it from the DB'''
 
-    # check if task_id in request
-    task_id = request_data.get("task_id", None)
-    if not task_id:
-        return {
-            "error": "Validation error",
-            "message": "Missing task id."
-            }, 400
+    # check if task id is provided in query parameters and if it is a valid one
+    task = check_task_id(request_data["id"])
 
-    # check if task_id is valid
-    task = get_task(task_id)
-    if not task:
-        return {
-            "error": "Validation error",
-            "message": "Invalid task id."
-            }, 404
-
-    # proceed with deleting the task
+    # proceed with deleting the task from DB
     try:
         db.session.delete(task)
         db.session.commit()
 
     except Exception as e:
         db.session.rollback()
-        return {"error": "Database error", "message": str(e)}, 500
+        current_app.logger.error(f"DB commit failed: {e}. User {token_user}")
+        abort(500, str(e))
 
-    return {"message" : "Task {} deleted from task list.".format(task_id)}, 200
+    return {}, 204

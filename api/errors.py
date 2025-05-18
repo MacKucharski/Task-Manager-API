@@ -1,8 +1,14 @@
-from werkzeug.http import HTTP_STATUS_CODES
+from api import api
+from flask import jsonify
+from werkzeug.exceptions import HTTPException
+from typing import Tuple, Optional
 
 
-def error_response(status_code, message=None):
-    payload = {'error': HTTP_STATUS_CODES.get(status_code, 'Unknown error')}
-    if message:
-        payload['message'] = message
-    return payload, status_code
+@api.errorhandler(HTTPException)
+def http_error(error):
+    payload = {
+        'error': error.name, 
+        'message': error.description,
+        'status': error.code
+        }
+    return jsonify(payload), error.code
