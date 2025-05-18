@@ -12,11 +12,9 @@ import sqlalchemy as sa
 import sqlalchemy.orm as so
 from datetime import datetime, timedelta, timezone
 import secrets
-# import db from __init__.py
 from api import db
 
 STATUS = Literal['new', 'in_progress', 'on_hold', 'finished', 'canceled']
-# ROLE = Literal['admin', 'member', 'lead']
 
 
 class PaginatedAPIMixin():
@@ -50,7 +48,7 @@ class User(db.Model, PaginatedAPIMixin):
     tasks: so.WriteOnlyMapped['Task'] = so.relationship(back_populates='assignee')
 
     def __repr__(self):
-        return "<User {}>".format(self.username)
+        return "<User {}, email: {}>".format(self.username, self.email)
     
     def obj_to_dict(self):
         return {
